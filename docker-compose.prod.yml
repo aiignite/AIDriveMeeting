@@ -1,0 +1,118 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: "${POSTGRES_USER:-postgres}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}"
+      POSTGRES_DB: "${POSTGRES_DB:-ai_drive_meeting}"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-ai_drive_meeting}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - appnet
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: "${DATABASE_URL:?DATABASE_URL is required}"
+      DATABASE_URL_SYNC: "${DATABASE_URL_SYNC:?DATABASE_URL_SYNC is required}"
+      SECRET_KEY: "${SECRET_KEY:?SECRET_KEY is required}"
+      CORS_ORIGINS: "${CORS_ORIGINS:-https://aiignite.com.cn}"
+      DEBUG: "${DEBUG:-false}"
+      # 生产环境关闭 /docs /redoc /openapi.json，避免对外暴露完整接口结构
+      API_DOCS_ENABLED: "${API_DOCS_ENABLED:-false}"
+      ADMIN_EMAIL: "${ADMIN_EMAIL:-}"
+      # AI：服务器无 Ollama，保留 mock 兜底；接入真实模型后在 .env 配置 provider/key
+      AI_PROVIDER: "${AI_PROVIDER:-ollama}"
+      OLLAMA_BASE_URL: "${OLLAMA_BASE_URL:-http://host.docker.internal:11434}"
+      OLLAMA_MODEL: "${OLLAMA_MODEL:-qwen2.5}"
+      AI_ALLOW_MOCK: "${AI_ALLOW_MOCK:-true}"
+      # SSO：与门户 AIDriveAll 共享 SECRET_KEY，实现 HttpOnly cookie 免密登录
+      SSO_ENABLED: "${SSO_ENABLED:-true}"
+      SSO_SECRET_KEY: "${SSO_SECRET_KEY:?SSO_SECRET_KEY is required}"
+      SSO_ISSUER: "${SSO_ISSUER:-aidriveall}"
+      SSO_COOKIE_NAME: "${SSO_COOKIE_NAME:-aidrive_token}"
+      # 会议语音转写：remote 模式指向本 compose 内的 asr_gateway 容器
+      MEETING_ASR_MODE: "${MEETING_ASR_MODE:-remote}"
+      MEETING_ASR_REMOTE_URL: "${MEETING_ASR_REMOTE_URL:-http://asr_gateway:8090/api/v1/transcribe}"
+      MEETING_ASR_REMOTE_API_KEY: "${MEETING_ASR_REMOTE_API_KEY:?MEETING_ASR_REMOTE_API_KEY is required}"
+      MEETING_ASR_REMOTE_TIMEOUT: "${MEETING_ASR_REMOTE_TIMEOUT:-3600}"
+      MEETING_ASR_FALLBACK_LOCAL: "${MEETING_ASR_FALLBACK_LOCAL:-false}"
+      # local 兜底/降级参数（无 GPU 用 small + cpu/int8）
+      MEETING_WHISPER_MODEL: "${MEETING_WHISPER_MODEL:-small}"
+      MEETING_WHISPER_LANGUAGE: "${MEETING_WHISPER_LANGUAGE:-zh}"
+      MEETING_WHISPER_DEVICE: "${MEETING_WHISPER_DEVICE:-cpu}"
+      MEETING_WHISPER_COMPUTE_TYPE: "${MEETING_WHISPER_COMPUTE_TYPE:-int8}"
+      # 单个录音上限 200MB；nginx 各层 client_max_body_size 须 ≥ 此值 + 1MB
+      MEETING_MAX_RECORDING_BYTES: "${MEETING_MAX_RECORDING_BYTES:-209715200}"
+      MEETING_WHISPER_MAX_CONCURRENT: "${MEETING_WHISPER_MAX_CONCURRENT:-1}"
+    ports:
+      - "127.0.0.1:3315:3315"
+    volumes:
+      - static_data:/app/static
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - appnet
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_BASE_PATH: ${VITE_BASE_PATH:-/}
+        VITE_API_URL: ${VITE_API_URL:-/api/v1}
+        NGINX_SUBPATH: ${NGINX_SUBPATH:-0}
+    restart: unless-stopped
+    ports:
+      - "3310:80"
+    depends_on:
+      - backend
+    networks:
+      - appnet
+
+  # ── 会议语音转写网关（本机 CPU 推理：small + int8）──
+  # backend 经服务名访问 http://asr_gateway:8090；ASR_API_KEY 与
+  # backend 的 MEETING_ASR_REMOTE_API_KEY 配置同一个密钥即可双向对齐。
+  asr_gateway:
+    build:
+      context: ./asr_gateway
+      dockerfile: Dockerfile
+      args:
+        # 构建期预下载的权重规格，与运行期 ASR_MODEL 保持一致可避免二次下载
+        ASR_PRELOAD_MODEL: ${ASR_MODEL:-small}
+    restart: unless-stopped
+    environment:
+      ASR_API_KEY: "${MEETING_ASR_REMOTE_API_KEY:?MEETING_ASR_REMOTE_API_KEY is required}"
+      ASR_MODEL: "${ASR_MODEL:-small}"
+      ASR_LANGUAGE: "${ASR_LANGUAGE:-zh}"
+      ASR_DEVICE: "${ASR_DEVICE:-cpu}"
+      ASR_COMPUTE_TYPE: "${ASR_COMPUTE_TYPE:-int8}"
+      ASR_PRELOAD: "${ASR_PRELOAD:-1}"
+    # 资源上限：服务器仅 2 核 / 3.7GB，限制转写占用以免拖垮门户与笔记接口
+    mem_limit: ${ASR_MEM_LIMIT:-1536m}
+    cpus: ${ASR_CPUS:-1.5}
+    ports:
+      # 仅回环暴露，便于本机调试：curl -H "X-API-Key: ..." http://127.0.0.1:8092/health
+      - "127.0.0.1:8092:8090"
+    networks:
+      - appnet
+
+volumes:
+  postgres_data:
+  static_data:
+
+networks:
+  appnet:
+    driver: bridge

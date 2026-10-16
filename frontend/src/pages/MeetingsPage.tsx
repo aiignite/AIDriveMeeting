@@ -1504,10 +1504,11 @@ const MeetingsPage: React.FC = () => {
                           </button>
                         </div>
                       </div>
-                      {/* storagePath 形如 "static/uploads/meetings/..." 已经是相对
-                          backend 根的路径，vite 把 /static/* 代理到 3265 */}
+                      {/* storagePath 形如 "static/uploads/meetings/..."，相对 backend 根。
+                          子路径部署（VITE_BASE_PATH=/meeting/）下须拼上 BASE_URL，
+                          否则浏览器请求 /static/* 会被外层 nginx 判 404 */}
                       <AudioPlayer
-                        src={`/${activeRecording.storagePath}`}
+                        src={`${(import.meta.env.BASE_URL ?? '/').replace(/\/+$/, '')}/${activeRecording.storagePath}`}
                         mimeType={activeRecording.mimeType || undefined}
                       />
                       <div className="mt-2">
