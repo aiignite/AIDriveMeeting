@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# Node
+node_modules/
+frontend/dist/
+
+# 环境变量与密钥（保留 .env.example）
+.env
+*.env
+!.env.example
+
+# 系统与日志
+.DS_Store
+*.log
+
+# ZCode 本地会话数据
+.zcode/
